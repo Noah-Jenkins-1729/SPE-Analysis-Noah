@@ -27,6 +27,7 @@ class SPE_data:
         invC: float,
         invC_err: float,
         filtered: bool,
+        do_CA: bool,
     ) -> None:
         """
         Initialize the SPE_data class. This class is used for collecting all the WaveformProcessor results for
@@ -38,6 +39,7 @@ class SPE_data:
         invC (float): The inverse of the capacitance.
         invC_err (float): The error in the inverse of the capacitance.
         filtered (bool): A flag indicating whether the data is filtered.
+        do_CA (bool): A flag indicating whether to calculate the CA or not.
 
         Returns:
         None
@@ -46,6 +48,7 @@ class SPE_data:
         self.invC = invC
         self.invC_err = invC_err
         self.filtered = filtered
+        self.do_CA = do_CA
         self.analyze_spe()
 
     def analyze_spe(self) -> None:
@@ -133,14 +136,15 @@ class SPE_data:
 
         spe = self.spe_res.eval(params=self.spe_res.params, x=self.bias_vals)
         spe_err = self.spe_res.eval_uncertainty(params=self.spe_res.params, x=self.bias_vals, sigma=1)
-        for wp, curr_bias, curr_spe, curr_spe_err in zip(self.campaign, self.bias_vals, spe, spe_err):
-            curr_CA_val, curr_CA_err = wp.get_CA_spe(curr_spe, curr_spe_err)
-            curr_CA_rms_val, curr_CA_rms_err = wp.get_CA_rms(curr_spe, curr_spe_err)
-            self.CA_vals.append(curr_CA_val)
-            self.CA_err.append(curr_CA_err)
-            self.CA_rms_vals.append(curr_CA_rms_val)
-            self.CA_rms_err.append(curr_CA_rms_err)
-
+        if self.do_CA:
+            for wp, curr_bias, curr_spe, curr_spe_err in zip(self.campaign, self.bias_vals, spe, spe_err):
+                curr_CA_val, curr_CA_err = wp.get_CA_spe(curr_spe, curr_spe_err)
+                curr_CA_rms_val, curr_CA_rms_err = wp.get_CA_rms(curr_spe, curr_spe_err)
+                self.CA_vals.append(curr_CA_val)
+                self.CA_err.append(curr_CA_err)
+                self.CA_rms_vals.append(curr_CA_rms_val)
+                self.CA_rms_err.append(curr_CA_rms_err)
+    
 #include interpolated v_bd value in CA model fit
         # bias_inclusive_bd = np.append(self.bias_vals,self.v_bd)
         # bias_inclusive_bd_err = np.append(self.bias_err,self.v_bd_err)
@@ -156,18 +160,17 @@ class SPE_data:
         # self.CA_rms_vals = np.array(self.CA_rms_vals)
         # self.CA_rms_err = np.array(self.CA_rms_err)
 
-        # i am stinky
-
-        CA_model = lm.Model(CA_func)
-        # CA_params = CA_model.make_params(A=1, B= 1, C = 0)
-        CA_params = CA_model.make_params(A=1, B=1)
-        # CA_params['A'].min = 0.1
-        # CA_params['C'].min = -5
-        # CA_params['C'].max = 5
-        CA_wgts = [1.0 / curr_std for curr_std in self.CA_err]
-        self.CA_res = CA_model.fit(
-            self.CA_vals, params=CA_params, x=self.ov, weights=CA_wgts
-        )
+        if self.do_CA:
+            CA_model = lm.Model(CA_func)
+            # CA_params = CA_model.make_params(A=1, B= 1, C = 0)
+            CA_params = CA_model.make_params(A=1, B=1)
+            # CA_params['A'].min = 0.1
+            # CA_params['C'].min = -5
+            # CA_params['C'].max = 5
+            CA_wgts = [1.0 / curr_std for curr_std in self.CA_err]
+            self.CA_res = CA_model.fit(
+                self.CA_vals, params=CA_params, x=self.ov, weights=CA_wgts
+            )
 
     def get_CA_ov(self, input_ov_vals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
