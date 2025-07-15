@@ -296,6 +296,7 @@ def fit_peaks_multigauss(
     centers: list[float],
     peak_range: tuple[float,float]=(1,4),
     cutoff: tuple[float, float] = (0, np.infty),
+    background_linear: bool = True,
 ) -> lm.model.ModelResult:
     """
     Fits multiple Gaussian functions to a 'finger plot' made from given values using the
@@ -326,11 +327,14 @@ def fit_peaks_multigauss(
             model = GaussianModel(prefix='g' + str(low_peak) + '_')
         else:
             model = model + GaussianModel(prefix='g' + str(peak) + '_')
-    model = model + LinearModel(prefix= 'l_')
+    if background_linear:
+        model = model + LinearModel(prefix= 'l_')
+    else:
+        model = model + ExponentialModel(prefix= 'e_')
     g_center = centers[:(peak_range[1]-peak_range[0]+1)]
     print('CENTER GUESSES TO BE USED IN FIT: ',g_center)
 
-    #constraints for center
+    # constraints for center
     g_center_index = 0
     for peak in range(low_peak, high_peak + 1):
         if peak == low_peak:
@@ -343,20 +347,26 @@ def fit_peaks_multigauss(
             model.set_param_hint('g' + str(peak) + '_center', value = g_center[ g_center_index], min = g_center[g_center_index] - baseline_width, max = baseline_width + g_center[g_center_index])
             g_center_index += 1
             # print('max ', baseline_width + g_center[g_center_index])
-    #constraints for sigma
+    # constraints for sigma
     for peak in range(low_peak, high_peak + 1):
         model.set_param_hint('g' + str(peak) + '_sigma', value = 0.5 * baseline_width, min = 0, max = baseline_width)
 
-    #constraints for amplitude
+    # constraints for amplitude
     g_amplitude = [np.amax(counts)*np.sqrt(2*np.pi)*baseline_width/(2**num) for num in range(low_peak, high_peak + 1)]
     g_amplitude_index = 0
-
     for peak in range(low_peak, high_peak + 1):
         model.set_param_hint('g' + str(peak) + '_amplitude', value = g_amplitude[g_amplitude_index], min = 0)
         g_amplitude_index += 1
 
-    model.set_param_hint('l_slope', value = 0, max = 0) #constraint the slope fit to be less or equal to 0
-    model.set_param_hint('l_intercept', value = counts[0])
+    if background_linear:
+        # constraints for linear fit
+        model.set_param_hint('l_slope', value=0, max=0) # constraint the slope fit to be less or equal to 0
+        model.set_param_hint('l_intercept', value=counts[0])
+    else:
+        # constraints for exponential fit
+        model.set_param_hint('e_decay', value=84e-3, min=0, max=1)
+        model.set_param_hint('e_amplitude', value=68) # counts[0]
+
     params = model.make_params()
     # params.pretty_print()
     res = model.fit(counts, params=params, x=bin_centers, weights = 1/np.sqrt(counts), nan_policy='omit')
@@ -495,6 +505,7 @@ class WaveformProcessor:
         peak_range: Tuple[int,int] = (1,4),
         no_solicit: bool = False,
         subtraction_method: bool = False,
+        background_linear: bool = True,
     ):
         """
         Initializes the WaveformProcessor class with the provided parameters.
@@ -523,6 +534,7 @@ class WaveformProcessor:
         self.range_low = cutoff[0]
         self.no_solicit = no_solicit
         self.subtraction_method = subtraction_method
+        self.background_linear = background_linear
         # options for if you forgot to take pre-breakdown data.......
         if no_solicit:
             self.baseline_mode = run_info_self.baseline_mode_mean
@@ -618,7 +630,8 @@ class WaveformProcessor:
                     baseline_width = 2.0 * self.baseline_std,
                     centers = self.centers,
                     peak_range = self.peak_range,
-                    cutoff = self.cutoff
+                    cutoff = self.cutoff,
+                    background_linear=self.background_linear
                     )
 
             self.peak_locs = [self.peak_fit.params['g' + str(idx + 1) + '_center'].value for idx in range(self.low_peak-1, self.high_peak)]
@@ -667,9 +680,7 @@ class WaveformProcessor:
                 weights=self.peak_wgts[: self.numpeaks],
             )  # creates linear fit model
 
-            print(
-                "SNR (SPE amplitude/baseline mode): " + str(self.spe_res.params["slope"].value / self.baseline_mode)
-            )
+            print(f"SNR (SPE amp/baseline mode): {self.spe_res.params["slope"].value / self.baseline_mode}")
             print(
                 "SNR 2-3: "
                 + str((self.peak_locs[2] - self.peak_locs[1]) / self.baseline_mode)
@@ -1019,6 +1030,8 @@ class WaveformProcessor:
         if savefig:
             plt.savefig(path)
             plt.close(fig)
+        else:
+            plt.show()
 
     def plot_baseline_histogram(
         self,
@@ -1102,45 +1115,76 @@ class WaveformProcessor:
         # else:
             # bin_density = int(np.sqrt(len(self.peak_values))) / (self.range_high - self.range_low)
         # total_num_bins = bin_density * (np.amax(self.all) - np.amin(self.all))
-        total_num_bins = bin_density * (np.amax(self.peak_values) - np.amin(self.peak_values))
+        # total_num_bins = bin_density * (np.amax(self.peak_values) - np.amin(self.peak_values))
+        total_num_bins = round(np.sqrt(len(self.peak_values)))
+        # print(f"{bin_density=}")
+        # print(f"{total_num_bins=}")
+
         textstr = f'Date: {self.info.date}\n'
         textstr += f'Condition: {self.info.condition}\n'
         textstr += f'Bias: {self.info.bias} [V]\n'
         textstr += f'RTD4: {self.info.temperature} [K]\n'
         textstr += f'--\n'
-        textstr += f'Peak Locations ($\\mu$) [V]\n'
+        textstr += f'Peak Locations ($\\mu$) [V]:\n'
         for peak in range(0,len(self.peak_sigmas)):
             actual_peak = self.peak_range[0] + peak
             # actual_peak = peak + 1
             if self.peak_fit.params['g' + str(actual_peak) + '_center'].stderr is not None:
                 textstr += f'''Peak {actual_peak}: {self.peak_fit.params['g' + str(actual_peak) + '_center'].value:0.2} $\\pm$ {self.peak_fit.params['g' + str(actual_peak) + '_center'].stderr:0.2}\n'''
         textstr += f'--\n'
-        textstr += 'Peak Width (\u03C3) [V]\n'
+        textstr += 'Peak Width (\u03C3) [V]:\n'
         for peak in range(0,len(self.peak_sigmas)):
             actual_peak = self.peak_range[0] + peak
             curr_sigma_err = self.peak_fit.params['g' + str(actual_peak) + '_sigma'].stderr
             if curr_sigma_err is not None:
                 textstr += f'''{peak + 1}: {round(self.peak_sigmas[peak],5)} $\\pm$ {curr_sigma_err:0.2}\n'''
         textstr += f'--\n'
-        textstr += f'''Reduced $\\chi^2$: {self.peak_fit.redchi:0.2}\n'''
-        curr_hist = np.histogram(self.peak_values, bins = self.numbins)
+        # textstr += 'Peak Amplitude (A)\n'
+        textstr += 'Peak Height [Counts]:\n'
+        for peak in range(0,len(self.peak_sigmas)):
+            actual_peak = self.peak_range[0] + peak
+            amp = self.peak_fit.params['g' + str(actual_peak) + '_amplitude'].value
+            amp_err = self.peak_fit.params['g' + str(actual_peak) + '_amplitude'].stderr
+            if not amp_err:
+                amp_err = 1.
+            # textstr += f'''{peak + 1}: {amp:0.4} $\\pm$ {amp_err:0.4}\n'''
+            amp_height = amp / (self.peak_sigmas[peak]*np.sqrt(2*np.pi))
+            amp_height_err = amp_height * np.sqrt((amp_err/amp)**2 +
+                                                  (self.peak_sigmas_stds[peak]/self.peak_sigmas[peak])**2)
+            textstr += f'''{peak + 1}: {amp_height:0.4} $\\pm$ {amp_height_err:0.4}\n'''
+        textstr += f'--\n'
+        if self.background_linear:
+            textstr += f'Linear Intercept: {self.peak_fit.best_values['l_intercept']:0.4}\n'
+            textstr += f'Linear Slope: {self.peak_fit.best_values['l_slope']:0.4}\n'
+        else:
+            textstr += f'Exp Amplitude: {self.peak_fit.best_values['e_amplitude']:0.4}\n'
+            textstr += f'Exp Decay: {self.peak_fit.best_values['e_decay']:0.4}\n'
+        textstr += f'--\n'
+        textstr += f'''Reduced $\\chi^2$: {self.peak_fit.redchi:0.2}'''
+        curr_hist = np.histogram(self.peak_values, bins=self.numbins)
         counts = curr_hist[0]
         bins = curr_hist[1]
         centers = (bins[1:] + bins[:-1])/2
         y_line_fit = self.peak_fit.eval(x=centers)
 
         plt.plot(centers, y_line_fit,'r-', label='best fit')
-        plt.plot(centers, self.peak_fit.best_values['l_intercept'] +  self.peak_fit.best_values['l_slope']*centers, 'b-', label='best fit - line')
+        if self.background_linear:
+            background_fit = self.peak_fit.best_values['l_intercept'] + self.peak_fit.best_values['l_slope']*centers
+        else:
+            background_fit = self.peak_fit.best_values['e_amplitude'] * np.exp(-centers/self.peak_fit.best_values['e_decay'])
+        plt.plot(centers, background_fit, 'b-', label='best fit - line')
         plt.grid(True)
-        props = dict(boxstyle='round', facecolor='tab:' + peakcolor, alpha=0.4)
-        plt.hist(self.peak_values, bins = int(total_num_bins), color = 'tab:' + peakcolor) #zoom
+        plt.hist(self.peak_values, bins = total_num_bins, color = 'tab:' + peakcolor) #zoom
+        # plt.hist(self.peak_values, bins = self.numbins, color = 'tab:' + peakcolor) #zoom
         # plt.hist(self.all, bins = int(total_num_bins), color = 'tab:' + peakcolor)
-        fig.text(0.55, 0.92, textstr, fontsize=8,
+        # TODO change to red if fit or sanity checks failed (locs not int multiples, or sigmas different)
+        props = dict(boxstyle='round', facecolor='tab:' + peakcolor, alpha=0.7)
+        fig.text(0.77, 0.95, textstr, fontsize=8,
                 verticalalignment='top', bbox=props)
-        plt.ylabel('Counts')
-        plt.xlabel('Pulse Amplitude [V]')
+        plt.ylabel('Counts', loc='top')
+        plt.xlabel('Pulse Amplitude [V]', loc='right')
         if log_scale:
-            plt.ylim(1E-1)
+            # plt.ylim(1E-1)
             plt.yscale('log')
         plt.tight_layout()
 
